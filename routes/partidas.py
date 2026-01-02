@@ -1,0 +1,610 @@
+from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify
+from sqlalchemy import text
+from db import engine
+from auth import token_required
+from datetime import datetime, timedelta, timezone
+from sqlalchemy.exc import IntegrityError
+
+bp = Blueprint('partidas', __name__)
+
+
+@bp.route("/partidas", methods=["POST"])
+@token_required
+def create_partida(current_user):
+    data = request.get_json()
+
+    required_fields = [
+        "id_time_casa",
+        "id_time_visitante",
+        "id_local",
+        "dthr_ini",
+        "dthr_fim",
+    ]
+    if not data or not all(key in data for key in required_fields):
+        return (
+            jsonify({
+                "error": "Campos obrigatórios: id_time_casa, id_time_visitante, id_local, dthr_ini, dthr_fim."
+            }),
+            400,
+        )
+
+    id_capitao = current_user._mapping["id_usuario"]
+    id_time_casa = data["id_time_casa"]
+    id_time_visitante = data["id_time_visitante"]
+    id_local = data["id_local"]
+
+    try:
+        dthr_ini = datetime.fromisoformat(data["dthr_ini"])
+        dthr_fim = datetime.fromisoformat(data["dthr_fim"])
+    except ValueError:
+        return (
+            jsonify({"error": "Formato de data inválido. Use AAAA-MM-DD HH:MM:SS."}),
+            400,
+        )
+
+    if id_time_casa == id_time_visitante:
+        return (
+            jsonify({"error": "O time da casa e o visitante não podem ser o mesmo."}),
+            400,
+        )
+
+    if dthr_ini >= dthr_fim:
+        return (
+            jsonify({"error": "A data/hora de início deve ser anterior à de término."}),
+            400,
+        )
+
+    try:
+        with engine.begin() as conn:
+            query_get_data = text(
+                """
+                SELECT t.fk_responsavel_time, l.horario_abertura, l.horario_fechamento 
+                FROM time AS t, local AS l
+                WHERE t.id_time = :id_time AND l.id_local = :id_local
+            """
+            )
+            result = conn.execute(
+                query_get_data, {"id_time": id_time_casa, "id_local": id_local}
+            ).fetchone()
+
+            if not result:
+                return jsonify({"error": "Time da casa ou Local não encontrado."}), 404
+
+            dados = result._mapping
+            if dados["fk_responsavel_time"] != id_capitao:
+                return (
+                    jsonify({
+                        "error": "Acesso negado. Apenas o capitão do time da casa pode agendar partidas."
+                    }),
+                    403,
+                )
+
+            horario_abertura_do_dia = dados["horario_abertura"]
+            horario_fechamento_do_dia = dados["horario_fechamento"]
+            local_fechado_o_dia_todo = False
+            motivo_fechamento = ""
+
+            query_check_exception = text(
+                """
+                SELECT motivo, horario_abertura_excecao, horario_fechamento_excecao
+                FROM local_excecoes 
+                WHERE fk_local = :id_local AND data_excecao = DATE(:dthr_ini)
+            """
+            )
+            excecao = conn.execute(
+                query_check_exception, {"id_local": id_local, "dthr_ini": dthr_ini}
+            ).fetchone()
+
+            if excecao:
+                ex_data = excecao._mapping
+                if ex_data["horario_abertura_excecao"] is None:
+                    local_fechado_o_dia_todo = True
+                    motivo_fechamento = (
+                        ex_data["motivo"] or "fechado por motivo não especificado"
+                    )
+                else:
+                    horario_abertura_do_dia = ex_data["horario_abertura_excecao"]
+                    horario_fechamento_do_dia = ex_data["horario_fechamento_excecao"]
+
+            if local_fechado_o_dia_todo:
+                return (
+                    jsonify({
+                        "error": f"Não é possível agendar neste dia. O local estará fechado.",
+                        "motivo": motivo_fechamento,
+                    }),
+                    409,
+                )
+
+            if horario_abertura_do_dia and horario_fechamento_do_dia:
+                hora_inicio_partida = dthr_ini.time()
+                hora_fim_partida = dthr_fim.time()
+                timedelta_inicio = timedelta(
+                    hours=hora_inicio_partida.hour, minutes=hora_inicio_partida.minute
+                )
+                timedelta_fim = timedelta(
+                    hours=hora_fim_partida.hour, minutes=hora_fim_partida.minute
+                )
+
+                if not (
+                    horario_abertura_do_dia <= timedelta_inicio
+                    and timedelta_fim <= horario_fechamento_do_dia
+                ):
+                    return (
+                        jsonify({
+                            "error": "O horário solicitado está fora do horário de funcionamento para este dia.",
+                            "funcionamento_do_dia": f"Das {horario_abertura_do_dia} às {horario_fechamento_do_dia}",
+                        }),
+                        409,
+                    )
+
+            query_check_conflict = text(
+                """
+                SELECT 1 FROM agendamento 
+                WHERE fk_local = :id_local AND dthr_ini < :dthr_fim AND dthr_fim > :dthr_ini
+            """
+            )
+            conflito = conn.execute(
+                query_check_conflict,
+                {"id_local": id_local, "dthr_ini": dthr_ini, "dthr_fim": dthr_fim},
+            ).fetchone()
+
+            if conflito:
+                return (
+                    jsonify({
+                        "error": "Horário indisponível. Já existe um agendamento neste local e período."
+                    }),
+                    409,
+                )
+
+            query_insert_agendamento = text(
+                "INSERT INTO agendamento (dthr_ini, dthr_fim, fk_local) VALUES (:dthr_ini, :dthr_fim, :fk_local)"
+            )
+            result_agendamento = conn.execute(
+                query_insert_agendamento,
+                {"dthr_ini": dthr_ini, "dthr_fim": dthr_fim, "fk_local": id_local},
+            )
+            id_agendamento = result_agendamento.lastrowid
+
+            query_insert_partida = text(
+                "INSERT INTO partida (fk_responsavel_partida, fk_agendamento) VALUES (:id_capitao, :id_agendamento)"
+            )
+            result_partida = conn.execute(
+                query_insert_partida,
+                {"id_capitao": id_capitao, "id_agendamento": id_agendamento},
+            )
+            id_partida = result_partida.lastrowid
+
+            query_insert_times = text(
+                "INSERT INTO time_partida (fk_time, fk_partida, casa_visitante) VALUES (:fk_time, :fk_partida, :cv)"
+            )
+            conn.execute(
+                query_insert_times,
+                {"fk_time": id_time_casa, "fk_partida": id_partida, "cv": "C"},
+            )
+            conn.execute(
+                query_insert_times,
+                {"fk_time": id_time_visitante, "fk_partida": id_partida, "cv": "V"},
+            )
+
+        return (
+            jsonify({"message": "Partida agendada com sucesso!", "id_partida": id_partida}),
+            201,
+        )
+
+    except Exception as e:
+        return jsonify({"error": "Ocorreu um erro interno.", "details": str(e)}), 500
+
+
+@bp.route('/partidas', methods=['GET'])
+@token_required
+def get_partidas(current_user):
+    id_usuario = current_user._mapping['id_usuario']
+    try:
+        with engine.connect() as conn:
+            query = text(
+                """
+                SELECT DISTINCT
+                    p.id_partida,
+                    a.dthr_ini,
+                    a.dthr_fim,
+                    l.nome AS nome_local,
+                    u.nome AS nome_responsavel,
+                    p.placar_time_casa,
+                    p.placar_time_visitante,
+                    (SELECT t.nome_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'C') AS time_casa,
+                    (SELECT t.nome_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'V') AS time_visitante
+                FROM partida AS p
+                JOIN agendamento AS a ON p.fk_agendamento = a.id_agendamento
+                JOIN local AS l ON a.fk_local = l.id_local
+                JOIN usuario AS u ON p.fk_responsavel_partida = u.id_usuario
+                JOIN time_partida AS tp_match ON p.id_partida = tp_match.fk_partida
+                JOIN time AS t_match ON tp_match.fk_time = t_match.id_time
+                LEFT JOIN time_membros AS tm ON t_match.id_time = tm.fk_time
+                WHERE
+                    t_match.fk_responsavel_time = :id_usuario OR tm.fk_usuario = :id_usuario
+                ORDER BY a.dthr_ini ASC
+            """
+            )
+
+            result = conn.execute(query, {
+                "id_usuario": id_usuario
+            })
+            partidas = [
+                {
+                    **row._mapping,
+                    'dthr_ini': row._mapping['dthr_ini'].isoformat(),
+                    'dthr_fim': row._mapping['dthr_fim'].isoformat(),
+                }
+                for row in result
+            ]
+
+        return jsonify(partidas)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>', methods=['GET'])
+@token_required
+def get_partida_details(current_user, id_partida):
+    try:
+        with engine.connect() as conn:
+            query_partida = text(
+                """
+                SELECT 
+                    p.id_partida, p.fk_responsavel_partida, a.dthr_ini, a.dthr_fim, l.nome AS nome_local, u.nome AS nome_responsavel, 
+                    p.placar_time_casa, p.placar_time_visitante,
+                    (SELECT t.id_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'C') AS id_time_casa,
+                    (SELECT t.nome_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'C') AS nome_time_casa,
+                    (SELECT t.id_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'V') AS id_time_visitante,
+                    (SELECT t.nome_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'V') AS nome_time_visitante
+                FROM partida AS p
+                JOIN agendamento AS a ON p.fk_agendamento = a.id_agendamento
+                JOIN local AS l ON a.fk_local = l.id_local
+                JOIN usuario AS u ON p.fk_responsavel_partida = u.id_usuario
+                WHERE p.id_partida = :id_partida
+            """
+            )
+
+            result_partida = conn.execute(query_partida, {"id_partida": id_partida}).fetchone()
+
+            if not result_partida:
+                return jsonify({"error": "Partida não encontrada."}), 404
+
+            partida_details = dict(result_partida._mapping)
+            partida_details['dthr_ini'] = partida_details['dthr_ini'].isoformat()
+            partida_details['dthr_fim'] = partida_details['dthr_fim'].isoformat()
+
+        return jsonify(partida_details)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>/presenca', methods=['POST'])
+@token_required
+def confirm_presence(current_user, id_partida):
+    data = request.get_json()
+    id_usuario = current_user._mapping['id_usuario']
+
+    if not data or 'status' not in data:
+        return jsonify({'error': "O campo 'status' é obrigatório."}), 400
+
+    status = data.get('status')
+    id_time = data.get('id_time') # Agora é opcional
+
+    valid_statuses = ['Confirmado', 'Duvida', 'Recusado']
+    if status not in valid_statuses:
+        return jsonify({'error': f"O campo 'status' deve ser um de: {valid_statuses}"}), 400
+
+    try:
+        with engine.begin() as conn:
+            # Se id_time não for fornecido, tenta deduzi-lo
+            if not id_time:
+                # Descobre em quais times da partida o usuário está
+                query_find_teams = text("""
+                    SELECT tm.fk_time FROM time_membros tm
+                    JOIN time_partida tp ON tm.fk_time = tp.fk_time
+                    WHERE tm.fk_usuario = :id_usuario AND tp.fk_partida = :id_partida
+                    UNION
+                    SELECT t.id_time FROM time t
+                    JOIN time_partida tp ON t.id_time = tp.fk_time
+                    WHERE t.fk_responsavel_time = :id_usuario AND tp.fk_partida = :id_partida
+                """)
+                user_teams_in_match = conn.execute(query_find_teams, {"id_usuario": id_usuario, "id_partida": id_partida}).fetchall()
+
+                if len(user_teams_in_match) == 1:
+                    id_time = user_teams_in_match[0][0]
+                elif len(user_teams_in_match) > 1:
+                    return jsonify({'error': 'Você pertence a mais de um time nesta partida. Por favor, especifique para qual time deseja confirmar.'}), 400
+                else:
+                    return jsonify({'error': 'Acesso negado. Você não é membro de nenhum dos times desta partida.'}), 403
+
+            # A partir daqui, id_time está garantido (seja por dedução ou por entrada)
+            # Valida se o time informado (ou deduzido) realmente participa da partida
+            query_check_team_in_match = text(
+                "SELECT 1 FROM time_partida WHERE fk_partida = :id_partida AND fk_time = :id_time"
+            )
+            team_in_match = conn.execute(query_check_team_in_match, {"id_partida": id_partida, "id_time": id_time}).fetchone()
+            if not team_in_match:
+                return jsonify({'error': 'O time informado não participa desta partida.'}), 400
+
+            # Insere ou atualiza a presença
+            # A verificação se o usuário pertence ao time já foi feita implicitamente pela lógica acima
+            query_upsert = text(
+                """
+                INSERT INTO partida_presenca (fk_partida, fk_usuario, fk_time, status)
+                VALUES (:id_partida, :id_usuario, :id_time, :status)
+                ON DUPLICATE KEY UPDATE status = VALUES(status), fk_time = VALUES(fk_time)
+                """
+            )
+            conn.execute(query_upsert, {"id_partida": id_partida, "id_usuario": id_usuario, "id_time": id_time, 'status': status})
+
+        return jsonify({'message': f"Sua presença foi atualizada para '{status}'."}), 200
+
+    except Exception as e:
+        # Em produção, é uma boa prática logar o erro 'e' em vez de retorná-lo ao cliente.
+        return jsonify({'error': "Ocorreu um erro interno.", "details": str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>/presenca', methods=['GET'])
+@token_required
+def get_presence_list(current_user, id_partida):
+    try:
+        with engine.connect() as conn:
+            query_check_match = text("SELECT 1 FROM partida WHERE id_partida = :id_partida")
+            match_exists = conn.execute(query_check_match, {'id_partida': id_partida}).fetchone()
+
+            if not match_exists:
+                return jsonify({'error': 'Partida não encontrada.'}), 404
+
+            query_get_list = text(
+                """
+                SELECT 
+                    u.id_usuario,
+                    u.nome AS nome_jogador,
+                    pp.status,
+                    t.nome_time
+                FROM partida_presenca pp
+                JOIN usuario AS u ON pp.fk_usuario = u.id_usuario
+                JOIN time t ON pp.fk_time = t.id_time
+                WHERE pp.fk_partida = :id_partida
+                ORDER BY t.nome_time, u.nome;
+            """
+            )
+
+            result = conn.execute(query_get_list, {'id_partida': id_partida})
+            presence_list = [dict(row._mapping) for row in result]
+
+        return jsonify(presence_list)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>/placar', methods=['PUT'])
+@token_required
+def register_score(current_user, id_partida):
+    data = request.get_json()
+    if not data or 'placar_time_casa' not in data or 'placar_time_visitante' not in data:
+        return jsonify({'error': "Os campos 'placar_time_casa' e 'placar_time_visitante' são obrigatórios."}), 400
+
+    try:
+        placar_casa = int(data['placar_time_casa'])
+        placar_visitante = int(data['placar_time_visitante'])
+        if placar_casa < 0 or placar_visitante < 0:
+            raise ValueError("Placar não pode ser negativo.")
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Os placares devem ser números inteiros não negativos.'}), 400
+
+    id_usuario_logado = current_user._mapping['id_usuario']
+
+    try:
+        with engine.begin() as conn:
+            query_get_partida = text("SELECT fk_responsavel_partida FROM partida WHERE id_partida = :id_partida")
+            partida_info = conn.execute(query_get_partida, {'id_partida': id_partida}).fetchone()
+
+            if not partida_info:
+                return jsonify({'error': 'Partida não encontrada.'}), 404
+
+            if partida_info._mapping['fk_responsavel_partida'] != id_usuario_logado:
+                return jsonify({'error': 'Acesso negado. Apenas quem agendou a partida pode registrar o placar.'}), 403
+
+            query_update_score = text(
+                """
+                UPDATE partida 
+                SET placar_time_casa = :placar_casa, placar_time_visitante = :placar_visitante
+                WHERE id_partida = :id_partida
+            """
+            )
+            conn.execute(query_update_score, {'placar_casa': placar_casa, 'placar_visitante': placar_visitante, 'id_partida': id_partida})
+
+        return jsonify({'message': 'Placar registrado com sucesso!'}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>', methods=['DELETE'])
+@token_required
+def cancel_partida(current_user, id_partida):
+    id_usuario_logado = current_user._mapping['id_usuario']
+
+    try:
+        with engine.begin() as conn:
+            query_get_partida = text("SELECT fk_responsavel_partida, fk_agendamento FROM partida WHERE id_partida = :id_partida")
+            partida_info = conn.execute(query_get_partida, {'id_partida': id_partida}).fetchone()
+
+            if not partida_info:
+                return jsonify({'error': 'Partida não encontrada.'}), 404
+
+            if partida_info._mapping['fk_responsavel_partida'] != id_usuario_logado:
+                return jsonify({'error': 'Acesso negado. Apenas quem agendou a partida pode cancelá-la.'}), 403
+
+            conn.execute(text('DELETE FROM time_partida WHERE fk_partida = :id_partida'), {'id_partida': id_partida})
+            conn.execute(text('DELETE FROM partida_presenca WHERE fk_partida = :id_partida'), {'id_partida': id_partida})
+            conn.execute(text('DELETE FROM partida WHERE id_partida = :id_partida'), {'id_partida': id_partida})
+
+            id_agendamento = partida_info._mapping['fk_agendamento']
+            conn.execute(text('DELETE FROM agendamento WHERE id_agendamento = :id_agendamento'), {'id_agendamento': id_agendamento})
+
+        return jsonify({'message': 'Partida cancelada com sucesso e horário liberado.'}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/eventos/tipos', methods=['GET'])
+@token_required
+def get_event_types(current_user):
+    """Retorna os tipos de eventos de partida disponíveis."""
+    try:
+        with engine.connect() as conn:
+            query = text("SELECT id_tp_evento, evento FROM tp_evento ORDER BY evento")
+            result = conn.execute(query)
+            event_types = [dict(row._mapping) for row in result]
+        return jsonify(event_types)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>/eventos', methods=['POST'])
+@token_required
+def add_match_event(current_user, id_partida):
+    """Adiciona um evento a uma partida (ex: gol, cartão)."""
+    data = request.get_json()
+    id_usuario_logado = current_user._mapping['id_usuario']
+
+    required_fields = ['fk_tp_evento', 'fk_usuario']
+    if not data or not all(key in data for key in required_fields):
+        return jsonify({'error': f"Campos obrigatórios: {required_fields}"}), 400
+
+    fk_tp_evento = data['fk_tp_evento']
+    fk_usuario = data['fk_usuario']
+    tempo_partida_evento = data.get('tempo_partida_evento')
+
+    try:
+        with engine.begin() as conn:
+            # 1. Verificar se quem requisita é o responsável pela partida
+            query_get_partida = text("SELECT fk_responsavel_partida FROM partida WHERE id_partida = :id_partida")
+            partida_info = conn.execute(query_get_partida, {'id_partida': id_partida}).fetchone()
+
+            if not partida_info:
+                return jsonify({'error': 'Partida não encontrada.'}), 404
+
+            if partida_info._mapping['fk_responsavel_partida'] != id_usuario_logado:
+                return jsonify({'error': 'Acesso negado. Apenas quem agendou a partida pode adicionar eventos.'}), 403
+
+            # 2. Verificar se o jogador pertence a um dos times da partida
+            query_check_player = text(
+                """
+                SELECT tm.fk_time FROM time_membros tm
+                JOIN time_partida tp ON tm.fk_time = tp.fk_time
+                WHERE tm.fk_usuario = :fk_usuario AND tp.fk_partida = :id_partida
+                UNION
+                SELECT t.id_time FROM time t
+                JOIN time_partida tp ON t.id_time = tp.fk_time
+                WHERE t.fk_responsavel_time = :fk_usuario AND tp.fk_partida = :id_partida
+                """
+            )
+            player_team = conn.execute(query_check_player, {'fk_usuario': fk_usuario, 'id_partida': id_partida}).fetchone()
+
+            if not player_team:
+                return jsonify({'error': 'Jogador inválido. O usuário não pertence a nenhum dos times desta partida.'}), 400
+
+            # 3. Inserir o evento
+            query_insert_event = text(
+                """
+                INSERT INTO evento_partida (fk_partida, fk_usuario, fk_tp_evento, tempo_partida_evento)
+                VALUES (:fk_partida, :fk_usuario, :fk_tp_evento, :tempo_partida_evento)
+                """
+            )
+            conn.execute(query_insert_event, {
+                'fk_partida': id_partida,
+                'fk_usuario': fk_usuario,
+                'fk_tp_evento': fk_tp_evento,
+                'tempo_partida_evento': tempo_partida_evento
+            })
+
+        return jsonify({'message': "Evento registrado com sucesso."}), 201
+
+    except IntegrityError as e:
+        # Captura erro de chave estrangeira, ex: fk_tp_evento não existe
+        if "foreign key constraint fails" in str(e.orig).lower():
+            return jsonify({'error': 'Tipo de evento (fk_tp_evento) inválido ou não encontrado.'}), 400
+        return jsonify({'error': 'Erro de integridade de dados.', 'details': str(e)}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>/eventos', methods=['GET'])
+@token_required
+def get_match_events(current_user, id_partida):
+    """Lista todos os eventos de uma partida específica."""
+    try:
+        with engine.connect() as conn:
+            # 1. Verificar se a partida existe
+            query_check_match = text("SELECT 1 FROM partida WHERE id_partida = :id_partida")
+            match_exists = conn.execute(query_check_match, {'id_partida': id_partida}).fetchone()
+
+            if not match_exists:
+                return jsonify({'error': 'Partida não encontrada.'}), 404
+
+            # 2. Buscar os eventos da partida
+            query_get_events = text(
+                """
+                SELECT 
+                    pe.id_evento_partida,
+                    pe.tempo_partida_evento,
+                    u.id_usuario,
+                    u.nome AS nome_jogador,
+                    tpe.evento AS tipo_evento,
+                    t.id_time,
+                    t.nome_time,
+                    pp.status AS status_presenca
+                FROM evento_partida AS pe
+                JOIN usuario AS u ON pe.fk_usuario = u.id_usuario
+                JOIN tp_evento AS tpe ON pe.fk_tp_evento = tpe.id_tp_evento
+                LEFT JOIN partida_presenca AS pp ON pe.fk_partida = pp.fk_partida AND pe.fk_usuario = pp.fk_usuario
+                LEFT JOIN time AS t ON pp.fk_time = t.id_time
+                WHERE pe.fk_partida = :id_partida
+                ORDER BY pe.tempo_partida_evento ASC, pe.id_evento_partida ASC
+                """
+            )
+            result = conn.execute(query_get_events, {'id_partida': id_partida})
+            events = [dict(row._mapping) for row in result]
+
+        return jsonify(events), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>/eventos/<int:id_evento_partida>', methods=['DELETE'])
+@token_required
+def delete_match_event(current_user, id_partida, id_evento_partida):
+    """Deleta um evento específico de uma partida. Apenas para o responsável da partida."""
+    id_usuario_logado = current_user._mapping['id_usuario']
+
+    try:
+        with engine.begin() as conn:
+            # 1. Verificar se quem requisita é o responsável pela partida
+            query_get_partida = text("SELECT fk_responsavel_partida FROM partida WHERE id_partida = :id_partida")
+            partida_info = conn.execute(query_get_partida, {'id_partida': id_partida}).fetchone()
+
+            if not partida_info:
+                return jsonify({'error': 'Partida não encontrada.'}), 404
+
+            if partida_info._mapping['fk_responsavel_partida'] != id_usuario_logado:
+                return jsonify({'error': 'Acesso negado. Apenas quem agendou a partida pode remover eventos.'}), 403
+
+            # 2. Deletar o evento, garantindo que ele pertence à partida correta
+            query_delete_event = text("DELETE FROM evento_partida WHERE id_evento_partida = :id_evento_partida AND fk_partida = :id_partida")
+            result = conn.execute(query_delete_event, {'id_evento_partida': id_evento_partida, 'id_partida': id_partida})
+
+            if result.rowcount == 0:
+                return jsonify({'error': 'Evento não encontrado nesta partida.'}), 404
+
+        return jsonify({'message': 'Evento removido com sucesso.'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
