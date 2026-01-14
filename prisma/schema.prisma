@@ -94,11 +94,18 @@ model teams {
   users                               users?         @relation(fields: [owner_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
 }
 
+enum Role {
+  ADMIN    // Acesso total (cria times, locais, gerencia tudo)
+  MANAGER  // Gerencia um time específico ou partidas
+  PLAYER   // Só visualiza e confirma presença
+}
+
 model users {
   user_id                                           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   user_name                                         String         @db.VarChar(100)
   user_email                                        String         @unique @db.VarChar(255)
   password_hash                                     String
+  role                                              Role           @default(PLAYER) // Papel padrão
   created_at                                        DateTime?      @default(now()) @db.Timestamptz(6)
   updated_at                                        DateTime?      @default(now()) @db.Timestamptz(6)
   is_active                                         Boolean?       @default(true)

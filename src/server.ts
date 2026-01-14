@@ -7,10 +7,18 @@ import { createLocation, getAllLocations } from './controllers/LocationControlle
 import { createMatch, getAllMatches } from './controllers/MatchController.ts';
 import { getMatchRoster, updateRosterStatus, updatePlayerAssignment } from './controllers/RosterController.ts';
 import { createMatchEvent } from './controllers/EventController.ts';
-
+import cors from 'cors';
 import { getMatchDashboard, finishMatch } from './controllers/MatchController.ts';
 
 const app = express();
+
+// Configuração do CORS
+app.use(cors({
+  origin: 'http://localhost:8080', // Permite apenas o seu front-end
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
 // Rotas Públicas
