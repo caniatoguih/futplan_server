@@ -84,3 +84,45 @@ export const updatePlayerAssignment = async (req: Request, res: Response) => {
     res.status(400).json({ error: "Erro ao definir time do jogador.", details: error.message });
   }
 };
+
+export const distributePlayers = async (req: Request, res: Response) => {
+  try {
+    const { match_id } = req.params;
+
+    // 1. Buscar todos os jogadores que estão no roster dessa partida
+    const players = await prisma.match_roster.findMany({
+      where: { match_id: match_id as string }
+    });
+
+    if (players.length === 0) {
+      return res.status(400).json({ error: "Não há jogadores no roster para distribuir." });
+    }
+
+    // 2. Embaralhar os jogadores (Algoritmo Fisher-Yates simples)
+    const shuffled = players.sort(() => Math.random() - 0.5);
+
+    // 3. Dividir ao meio
+    const half = Math.ceil(shuffled.length / 2);
+    
+    // 4. Preparar as atualizações
+    const updates = shuffled.map((player: typeof players[number], index: number) => {
+      const assignment = index < half ? 'home' : 'away';
+      return prisma.match_roster.update({
+        where: {
+          match_id_user_id: {
+            match_id: player.match_id,
+            user_id: player.user_id
+          }
+        },
+        data: { team_assignment: assignment }
+      });
+    });
+
+    // Executa todas as atualizações em uma transação
+    await prisma.$transaction(updates);
+
+    res.json({ message: "Times distribuídos aleatoriamente!", total_players: players.length });
+  } catch (error: any) {
+    res.status(500).json({ error: "Erro ao distribuir jogadores.", details: error.message });
+  }
+};
