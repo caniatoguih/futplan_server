@@ -36,6 +36,15 @@ export const updateRosterStatus = async (req: Request, res: Response) => {
     const { status } = req.body;
     const userId = (req as any).userId;
 
+    // Validar status permitidos
+    const validStatuses = ['pending', 'accepted', 'rejected', 'confirmed'];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({ 
+        error: "Status inválido.", 
+        details: `Status deve ser um de: ${validStatuses.join(', ')}` 
+      });
+    }
+
     const updated = await prisma.match_roster.update({
       where: {
         // Certifique-se que o nome do campo é este no seu schema.prisma
@@ -85,6 +94,86 @@ export const updatePlayerAssignment = async (req: Request, res: Response) => {
   }
 };
 
+export const addPlayerToMatch = async (req: Request, res: Response) => {
+  try {
+    const { match_id } = req.params;
+    const { user_id, user_email } = req.body;
+
+    if (!user_id && !user_email) {
+      return res.status(400).json({ error: "Forneça user_id ou user_email." });
+    }
+
+    // Verificar se a partida existe e não tem times vinculados
+    const match = await prisma.matches.findUnique({
+      where: { match_id: match_id as string }
+    });
+
+    if (!match) {
+      return res.status(404).json({ error: "Partida não encontrada." });
+    }
+
+    if (match.home_team_id || match.away_team_id) {
+      return res.status(400).json({ error: "Esta partida já possui times vinculados. Use a funcionalidade de times para adicionar jogadores." });
+    }
+
+    // Buscar o usuário pelo email ou user_id
+    let user;
+    if (user_email) {
+      user = await prisma.users.findUnique({
+        where: { user_email: user_email as string }
+      });
+    } else {
+      user = await prisma.users.findUnique({
+        where: { user_id: user_id as string }
+      });
+    }
+
+    if (!user) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    // Verificar se o jogador já está no roster
+    const existingRoster = await prisma.match_roster.findUnique({
+      where: {
+        match_id_user_id: {
+          match_id: match_id as string,
+          user_id: user.user_id
+        }
+      }
+    });
+
+    if (existingRoster) {
+      return res.status(400).json({ error: "Este jogador já foi adicionado à partida." });
+    }
+
+    // Adicionar o jogador ao roster
+    const newRosterEntry = await prisma.match_roster.create({
+      data: {
+        match_id: match_id as string,
+        user_id: user.user_id,
+        status: 'pending'
+      },
+      include: {
+        users: {
+          select: {
+            user_id: true,
+            user_name: true,
+            user_email: true
+          }
+        }
+      }
+    });
+
+    res.status(201).json({ 
+      message: `${newRosterEntry.users.user_name} foi adicionado à partida!`, 
+      roster: newRosterEntry 
+    });
+  } catch (error: any) {
+    console.error('Erro ao adicionar jogador:', error);
+    res.status(500).json({ error: "Erro ao adicionar jogador à partida.", details: error.message });
+  }
+};
+
 export const distributePlayers = async (req: Request, res: Response) => {
   try {
     const { match_id } = req.params;
@@ -124,5 +213,89 @@ export const distributePlayers = async (req: Request, res: Response) => {
     res.json({ message: "Times distribuídos aleatoriamente!", total_players: players.length });
   } catch (error: any) {
     res.status(500).json({ error: "Erro ao distribuir jogadores.", details: error.message });
+  }
+};
+
+export const clearTeamAssignments = async (req: Request, res: Response) => {
+  try {
+    const { match_id } = req.params;
+
+    // Verificar se a partida existe
+    const match = await prisma.matches.findUnique({
+      where: { match_id: match_id as string }
+    });
+
+    if (!match) {
+      return res.status(404).json({ error: "Partida não encontrada." });
+    }
+
+    // Limpar as atribuições de time de todos os jogadores
+    const result = await prisma.match_roster.updateMany({
+      where: { match_id: match_id as string },
+      data: { team_assignment: null }
+    });
+
+    res.json({ 
+      message: "Distribuição de times desfeita com sucesso!", 
+      playersUpdated: result.count 
+    });
+  } catch (error: any) {
+    console.error('Erro ao desfazer distribuição:', error);
+    res.status(500).json({ error: "Erro ao desfazer distribuição.", details: error.message });
+  }
+};
+
+export const manualTeamAssignment = async (req: Request, res: Response) => {
+  try {
+    const { match_id } = req.params;
+    const { assignments } = req.body; // Array de { user_id, team_assignment }
+
+    if (!Array.isArray(assignments) || assignments.length === 0) {
+      return res.status(400).json({ error: "Forneça um array de atribuições com user_id e team_assignment." });
+    }
+
+    // Verificar se a partida existe
+    const match = await prisma.matches.findUnique({
+      where: { match_id: match_id as string }
+    });
+
+    if (!match) {
+      return res.status(404).json({ error: "Partida não encontrada." });
+    }
+
+    // Validar todas as atribuições antes de processar
+    for (const assignment of assignments) {
+      if (!assignment.user_id || !assignment.team_assignment) {
+        return res.status(400).json({ error: "Cada atribuição deve conter user_id e team_assignment." });
+      }
+
+      if (!['home', 'away'].includes(assignment.team_assignment)) {
+        return res.status(400).json({ error: "team_assignment deve ser 'home' ou 'away'." });
+      }
+    }
+
+    // Preparar as atualizações
+    const updates = assignments.map((assignment: { user_id: string; team_assignment: string }) => {
+      return prisma.match_roster.update({
+        where: {
+          match_id_user_id: {
+            match_id: match_id as string,
+            user_id: assignment.user_id
+          }
+        },
+        data: { team_assignment: assignment.team_assignment }
+      });
+    });
+
+    // Executar todas as atualizações em uma transação
+    await prisma.$transaction(updates);
+
+    res.json({ 
+      message: "Times atribuídos manualmente com sucesso!", 
+      playersUpdated: assignments.length 
+    });
+  } catch (error: any) {
+    console.error('Erro ao atribuir times manualmente:', error);
+    res.status(500).json({ error: "Erro ao atribuir times manualmente.", details: error.message });
   }
 };

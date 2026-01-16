@@ -52,6 +52,7 @@ export const login = async (req: Request, res: Response) => {
       token
     });
   } catch (error) {
-    res.status(500).json({ error: "Erro interno." });
+    console.error('Login error:', error);
+    res.status(500).json({ error: "Erro interno.", details: error instanceof Error ? error.message : String(error) });
   }
 };
