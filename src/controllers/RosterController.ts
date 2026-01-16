@@ -177,6 +177,19 @@ export const distributePlayers = async (req: Request, res: Response) => {
   try {
     const { match_id } = req.params;
 
+    // Verificar se a partida existe e se tem times vinculados
+    const match = await prisma.matches.findUnique({
+      where: { match_id: match_id as string }
+    });
+
+    if (!match) {
+      return res.status(404).json({ error: "Partida não encontrada." });
+    }
+
+    if (match.home_team_id || match.away_team_id) {
+      return res.status(400).json({ error: "Não é possível realizar sorteio em partidas com times oficiais definidos." });
+    }
+
     // 1. Buscar todos os jogadores que estão no roster dessa partida
     const players = await prisma.match_roster.findMany({
       where: { match_id: match_id as string }

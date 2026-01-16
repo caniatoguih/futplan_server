@@ -32,19 +32,35 @@ export const getMyTeams = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId; // Obtido do Token pelo middleware
 
-    const teams = await prisma.teams.findMany({
-      where: {
-        OR: [
-          { owner_id: userId }, // Times que eu criei
-          { team_members: { some: { user_id: userId } } } // Times onde sou membro
-        ]
-      },
-      include: {
-        _count: {
-          select: { team_members: true } // Retorna a quantidade de jogadores no time
+    // Split query into two simpler queries to avoid timeout
+    const [ownedTeams, memberTeams] = await Promise.all([
+      // Teams I own
+      prisma.teams.findMany({
+        where: { owner_id: userId },
+        include: {
+          _count: {
+            select: { team_members: true }
+          }
         }
-      }
-    });
+      }),
+      // Teams where I'm a member (but not the owner)
+      prisma.teams.findMany({
+        where: {
+          team_members: {
+            some: { user_id: userId }
+          },
+          owner_id: { not: userId } // Exclude teams I own to avoid duplicates
+        },
+        include: {
+          _count: {
+            select: { team_members: true }
+          }
+        }
+      })
+    ]);
+
+    // Combine results
+    const teams = [...ownedTeams, ...memberTeams];
 
     res.json(teams);
 } catch (error) {
