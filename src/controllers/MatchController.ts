@@ -4,12 +4,13 @@ import { prisma, pool } from '../database.ts';
 export const createMatch = async (req: Request, res: Response) => {
   try {
     const { home_team_id, away_team_id, location_id, match_datetime } = req.body;
+    const userId = (req as any).userId;
 
     // 1. Inserção usando o driver NATIVO (pula o bug do Prisma)
     await pool.query(
-      `INSERT INTO matches (location_id, home_team_id, away_team_id, match_datetime, match_status) 
-       VALUES ($1, $2, $3, $4, $5)`,
-      [location_id, home_team_id, away_team_id, new Date(match_datetime), 'scheduled']
+      `INSERT INTO matches (location_id, home_team_id, away_team_id, match_datetime, match_status, created_by) 
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [location_id, home_team_id, away_team_id, new Date(match_datetime), 'scheduled', userId]
     );
 
     // 2. Agora usamos o Prisma apenas para buscar e formatar o JSON de resposta (o SELECT ele faz sem erro)
@@ -59,10 +60,16 @@ export const getMatchDashboard = async (req: Request, res: Response) => {
         locations: true,
         // Buscamos apenas os nomes dos times
         teams_matches_home_team_idToteams: {
-          select: { team_name: true }
+          select: { 
+            team_name: true,
+            team_main_color_hex: true
+          }
         },
         teams_matches_away_team_idToteams: {
-          select: { team_name: true }
+          select: { 
+            team_name: true,
+            team_main_color_hex: true
+          }
         },
         // Cronologia dos gols e cartões
         match_events: {

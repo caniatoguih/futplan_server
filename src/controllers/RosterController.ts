@@ -36,12 +36,11 @@ export const updateRosterStatus = async (req: Request, res: Response) => {
     const { status } = req.body;
     const userId = (req as any).userId;
 
-    // Validar status permitidos
-    const validStatuses = ['pending', 'accepted', 'rejected', 'confirmed'];
-    if (!status || !validStatuses.includes(status)) {
+    const validStatuses = ['confirmed', 'pending', 'waiting_list', 'pending_decision'];
+    if (!validStatuses.includes(status)) {
       return res.status(400).json({ 
         error: "Status inválido.", 
-        details: `Status deve ser um de: ${validStatuses.join(', ')}` 
+        details: `Valores permitidos: ${validStatuses.join(', ')}` 
       });
     }
 
@@ -297,5 +296,71 @@ export const manualTeamAssignment = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Erro ao atribuir times manualmente:', error);
     res.status(500).json({ error: "Erro ao atribuir times manualmente.", details: error.message });
+  }
+};
+
+export const syncTeamPlayersToRoster = async (req: Request, res: Response) => {
+  try {
+    const { match_id } = req.params;
+
+    // Buscar a partida e os membros dos times vinculados
+    const match = await prisma.matches.findUnique({
+      where: { match_id: match_id as string },
+      include: {
+        teams_matches_home_team_idToteams: {
+          include: { team_members: true }
+        },
+        teams_matches_away_team_idToteams: {
+          include: { team_members: true }
+        }
+      }
+    });
+
+    if (!match) {
+      return res.status(404).json({ error: "Partida não encontrada." });
+    }
+
+    const homeMembers = match.teams_matches_home_team_idToteams?.team_members || [];
+    const awayMembers = match.teams_matches_away_team_idToteams?.team_members || [];
+
+    if (homeMembers.length === 0 && awayMembers.length === 0) {
+      return res.status(400).json({ error: "Não há jogadores nos times vinculados para importar." });
+    }
+
+    const operations = [];
+
+    // Função auxiliar para gerar a operação de upsert
+    const createUpsertOp = (userId: string, assignment: 'home' | 'away') => {
+      return prisma.match_roster.upsert({
+        where: {
+          match_id_user_id: {
+            match_id: match_id as string,
+            user_id: userId
+          }
+        },
+        create: {
+          match_id: match_id as string,
+          user_id: userId,
+          team_assignment: assignment,
+          status: 'confirmed'
+        },
+        update: {
+          team_assignment: assignment
+        }
+      });
+    };
+
+    // Adiciona operações para Home e Away
+    homeMembers.forEach(m => operations.push(createUpsertOp(m.user_id, 'home')));
+    awayMembers.forEach(m => operations.push(createUpsertOp(m.user_id, 'away')));
+
+    await prisma.$transaction(operations);
+
+    res.json({ 
+      message: "Jogadores importados e sincronizados com sucesso!", 
+      total_processed: operations.length 
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: "Erro ao sincronizar jogadores dos times.", details: error.message });
   }
 };

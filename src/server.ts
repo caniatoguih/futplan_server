@@ -5,7 +5,7 @@ import { createTeam, getMyTeams } from './controllers/TeamController.ts';
 import { authMiddleware } from './middlewares/auth.ts';
 import { createLocation, getAllLocations } from './controllers/LocationController.ts';
 import { createMatch, getAllMatches } from './controllers/MatchController.ts';
-import { getMatchRoster, updateRosterStatus, updatePlayerAssignment, distributePlayers, addPlayerToMatch, clearTeamAssignments, manualTeamAssignment } from './controllers/RosterController.ts';
+import { getMatchRoster, updateRosterStatus, updatePlayerAssignment, distributePlayers, addPlayerToMatch, clearTeamAssignments, manualTeamAssignment, syncTeamPlayersToRoster } from './controllers/RosterController.ts';
 import { createMatchEvent } from './controllers/EventController.ts';
 import cors from 'cors';
 import { checkRole } from './middlewares/role.ts';
@@ -41,10 +41,11 @@ app.post('/matches/:match_id/events', authMiddleware, createMatchEvent);
 app.get('/matches/:match_id/roster', authMiddleware, getMatchRoster);
 app.patch('/matches/:match_id/roster', authMiddleware, updateRosterStatus);
 app.post('/matches/:match_id/roster', authMiddleware, addPlayerToMatch);
+app.post('/matches/:match_id/roster/sync', authMiddleware, syncTeamPlayersToRoster); // Nova rota
 
 // Apenas ADMIN ou MANAGER podem "sortear" os times
-app.post('/matches/:match_id/distribute', authMiddleware, checkRole(['ADMIN', 'MANAGER']), distributePlayers);
-app.delete('/matches/:match_id/distribute', authMiddleware, checkRole(['ADMIN', 'MANAGER']), clearTeamAssignments);
+app.post('/matches/:match_id/distribute', authMiddleware, distributePlayers);
+app.delete('/matches/:match_id/distribute', authMiddleware, clearTeamAssignments);
 app.patch('/matches/:match_id/teams/assign', authMiddleware, checkRole(['ADMIN', 'MANAGER']), manualTeamAssignment);
 
 app.patch('/matches/:match_id/roster/:user_id/assign', authMiddleware, updatePlayerAssignment);
