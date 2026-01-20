@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import { register, login } from './controllers/AuthController.ts';
-import { createTeam, getMyTeams } from './controllers/TeamController.ts';
+import { createTeam, getMyTeams, getTeamsByUserEmail } from './controllers/TeamController.ts';
 import { authMiddleware } from './middlewares/auth.ts';
 import { createLocation, getAllLocations } from './controllers/LocationController.ts';
 import { createMatch, getAllMatches } from './controllers/MatchController.ts';
@@ -9,7 +9,7 @@ import { getMatchRoster, updateRosterStatus, updatePlayerAssignment, distributeP
 import { createMatchEvent } from './controllers/EventController.ts';
 import cors from 'cors';
 import { checkRole } from './middlewares/role.ts';
-import { getMatchDashboard, finishMatch } from './controllers/MatchController.ts';
+import { getMatchDashboard, finishMatch, respondToMatchInvite } from './controllers/MatchController.ts';
 
 const app = express();
 
@@ -29,12 +29,14 @@ app.post('/login', login);
 // Rotas Protegidas (Exigem o Token no Header)
 app.post('/teams', authMiddleware, createTeam);
 app.get('/teams/my', authMiddleware, getMyTeams); // Nova rota para listar os meus times
+app.get('/teams/search', authMiddleware, getTeamsByUserEmail); // Busca times por email do dono
 
 app.get('/locations', authMiddleware, getAllLocations);
 app.post('/locations', authMiddleware, createLocation);
 
 app.post('/matches', authMiddleware, createMatch);
 app.get('/matches', authMiddleware, getAllMatches);
+app.patch('/matches/:match_id/invite', authMiddleware, respondToMatchInvite);
 
 app.post('/matches/:match_id/events', authMiddleware, createMatchEvent);
 

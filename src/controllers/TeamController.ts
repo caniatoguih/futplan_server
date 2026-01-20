@@ -68,3 +68,31 @@ export const getMyTeams = async (req: Request, res: Response) => {
   res.status(500).json({ error: "Erro ao procurar os teus times." });
 }
 };
+
+export const getTeamsByUserEmail = async (req: Request, res: Response) => {
+  try {
+    const email = req.query.email as string;
+
+    if (!email) {
+      return res.status(400).json({ error: "Informe o email para busca." });
+    }
+
+    const user = await prisma.users.findUnique({
+      where: { user_email: email }
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    // Listamos apenas os times que o usuário é DONO, pois apenas o dono pode aceitar convites de jogo
+    const teams = await prisma.teams.findMany({
+      where: { owner_id: user.user_id }
+    });
+
+    res.json(teams);
+  } catch (error) {
+    console.error("Erro ao buscar times por email:", error);
+    res.status(500).json({ error: "Erro ao buscar times." });
+  }
+};
