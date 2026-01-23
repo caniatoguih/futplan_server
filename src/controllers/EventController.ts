@@ -6,6 +6,10 @@ export const createMatchEvent = async (req: Request, res: Response) => {
         const match_id = req.params.match_id as string;
         const { event_type, user_id, assist_player_id, match_minute, description } = req.body;
 
+        if (!user_id) {
+            return res.status(400).json({ error: "O campo user_id é obrigatório." });
+        }
+
         // Apenas criamos o evento. A TRIGGER no Postgres cuida do placar.
         const event = await prisma.match_events.create({
             data: {

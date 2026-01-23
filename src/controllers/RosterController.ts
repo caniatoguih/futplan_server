@@ -340,7 +340,7 @@ export const syncTeamPlayersToRoster = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Não há jogadores nos times vinculados para importar." });
     }
 
-    const operations = [];
+    const operations: any[] = [];
 
     // Função auxiliar para gerar a operação de upsert
     const createUpsertOp = (userId: string, assignment: 'home' | 'away') => {
