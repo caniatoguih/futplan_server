@@ -96,6 +96,45 @@ export const getMatchDashboard = async (req: Request, res: Response) => {
   }
 };
 
+export const startMatch = async (req: Request, res: Response) => {
+  try {
+    const { match_id } = req.params;
+    const userId = (req as any).userId;
+
+    const match = await prisma.matches.findUnique({
+      where: { match_id: match_id as string },
+    });
+
+    if (!match) {
+      return res.status(404).json({ error: "Partida não encontrada." });
+    }
+
+    if (match.created_by !== userId) {
+      return res.status(403).json({ error: "Apenas o criador da partida pode iniciá-la." });
+    }
+
+    if (new Date() < new Date(match.match_datetime)) {
+        return res.status(400).json({ error: "A partida só pode ser iniciada após o horário agendado." });
+    }
+    
+    if (match.match_status !== 'scheduled' && match.match_status !== 'pending_approval') {
+        return res.status(400).json({ error: "A partida não pode ser iniciada. Status atual: " + match.match_status });
+    }
+
+    const updatedMatch = await prisma.matches.update({
+      where: { match_id: match_id as string },
+      data: { 
+        match_status: 'in_progress',
+        updated_at: new Date()
+      }
+    });
+
+    res.json(updatedMatch);
+  } catch (error: any) {
+    res.status(400).json({ error: "Erro ao iniciar partida.", details: error.message });
+  }
+};
+
 export const finishMatch = async (req: Request, res: Response) => {
   try {
     const { match_id } = req.params;

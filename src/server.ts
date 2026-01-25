@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import { register, login } from './controllers/AuthController.ts';
-import { createTeam, getMyTeams, getTeamsByUserEmail } from './controllers/TeamController.ts';
+import { createTeam, getMyTeams, getTeamsByUserEmail, getTeam, addTeamMember, removeTeamMember, getTeamMatches } from './controllers/TeamController.ts';
 import { authMiddleware } from './middlewares/auth.ts';
 import { createLocation, getAllLocations } from './controllers/LocationController.ts';
 import { createMatch, getAllMatches } from './controllers/MatchController.ts';
@@ -9,7 +9,7 @@ import { getMatchRoster, updateRosterStatus, updatePlayerAssignment, distributeP
 import { createMatchEvent } from './controllers/EventController.ts';
 import cors from 'cors';
 import { checkRole } from './middlewares/role.ts';
-import { getMatchDashboard, finishMatch, respondToMatchInvite } from './controllers/MatchController.ts';
+import { getMatchDashboard, finishMatch, respondToMatchInvite, startMatch } from './controllers/MatchController.ts';
 
 const app = express();
 
@@ -30,6 +30,11 @@ app.post('/login', login);
 app.post('/teams', authMiddleware, createTeam);
 app.get('/teams/my', authMiddleware, getMyTeams); // Nova rota para listar os meus times
 app.get('/teams/search', authMiddleware, getTeamsByUserEmail); // Busca times por email do dono
+
+app.get('/teams/:id', authMiddleware, getTeam);
+app.post('/teams/:id/members', authMiddleware, addTeamMember);
+app.delete('/teams/:id/members/:userId', authMiddleware, removeTeamMember);
+app.get('/teams/:id/matches', authMiddleware, getTeamMatches);
 
 app.get('/locations', authMiddleware, getAllLocations);
 app.post('/locations', authMiddleware, createLocation);
@@ -53,6 +58,7 @@ app.patch('/matches/:match_id/teams/assign', authMiddleware, checkRole(['ADMIN',
 app.patch('/matches/:match_id/roster/:user_id/assign', authMiddleware, updatePlayerAssignment);
 
 app.get('/matches/:match_id/dashboard', authMiddleware, getMatchDashboard);
+app.patch('/matches/:match_id/start', authMiddleware, startMatch);
 app.patch('/matches/:match_id/finish', authMiddleware, finishMatch);
 
 app.listen(3000, () => console.log('🚀 FutPlan API rodando na porta 3000'));
